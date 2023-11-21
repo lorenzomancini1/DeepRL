@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -43,19 +44,20 @@ def get_env_shape(env):
 
     return obs_dim, act_dim
 
-def get_returns(rewards, next_value, mask, γ):
+def get_returns(rewards, values, mask, gamma, lambda_):
     returns = np.zeros_like(rewards)
-    R = next_value
+    GAE = 0
     for t in reversed(range(len(rewards))):
-        R = rewards[t] + γ * R * mask[t]
-        #returns.insert(0, R)
-        returns[t] = R
+        delta = rewards[t] + gamma * values[t + 1] * mask[t] - values[t]
+        GAE = delta + gamma * lambda_ * GAE * mask[t]
+        returns[t] = GAE + values[t]
     return returns
 
 class A2C:
-    def __init__(self, env_name, hidden_dim = 128, lr_a = 3e-4, lr_c = 3e-4, gamma = 0.99):
+    def __init__(self, env_name, hidden_dim = 128, lr_a = 3e-4, lr_c = 3e-4, gamma = 0.99, lambda_ = 1):
 
         self.gamma = gamma
+        self.lambda_ = lambda_
         #self.max_steps = max_steps
         self.env  = gym.make(env_name)
         self.obs_dim , self.act_dim = get_env_shape(self.env)
@@ -67,6 +69,9 @@ class A2C:
         #initialize optimizers
         self.optimizer_a = optim.Adam(self.actor.parameters(),  lr = lr_a)
         self.optimizer_c = optim.Adam(self.critic.parameters(),  lr = lr_c)
+
+    def close(self):
+        self.env.close()
 
     def rollout(self, max_steps = 100):
         '''
@@ -102,12 +107,14 @@ class A2C:
             state = new_state
 
             if done: break
-        return rewards, values, log_probs, mask, new_state
+        #append the values of the new state for the computations of returns
+        values.append(self.critic(torch.tensor(new_state).unsqueeze(0)))
+        return rewards, values, log_probs, mask#, new_state
 
 
-    def update(self, rewards, values, log_probs, mask, new_state):
-        new_value = self.critic(torch.tensor(new_state).unsqueeze(0))
-        returns   = get_returns(rewards, new_value, mask, self.gamma)
+    def update(self, rewards, values, log_probs, mask):
+        #new_value = self.critic(torch.tensor(new_state).unsqueeze(0))
+        returns   = get_returns(rewards, values, mask, self.gamma, self.lambda_)
 
         returns   = torch.tensor(returns)
         values    = torch.stack(values)
@@ -131,20 +138,48 @@ class A2C:
 
 #training loop
 if __name__ == "__main__":
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--env", type=str, default="CartPole-v1")
+    parser.add_argument("-e", "--env", type=str, default="CartPole-v1", help="set the gym environment")
+    parser.add_argument("--episodes", type=int, default=1000, help="number of episodes to run")
+    parser.add_argument("-s", "--steps", type=int, default=100, help="number of steps per episode")
+    parser.add_argument("-g", "--gamma", type=float, default=0.99, help="set the discount factor")
+    parser.add_argument("-l", "--lambda_", type=float, default=1, help="set the lambda value for the GAE")
+    parser.add_argument("-v", "--verbose", action="count", help="show log of rewards")
+
     args = parser.parse_args()
 
-    model = A2C(args.env)
-    episodes = 1000
-    max_steps = 100
+    env_name = args.env
+    print("#################################")
+    print("Running:", env_name)
+    print("#################################")
+
+    model = A2C(env_name=env_name, gamma=args.gamma, lambda_ = args.lambda_)
+    episodes = args.episodes
+    max_steps = args.steps
+
+    rewards_history = np.zeros(episodes)
     for episode in range(episodes):
-        rewards, values, log_probs, mask, new_state = model.rollout(max_steps)
+        rewards, values, log_probs, mask = model.rollout(max_steps)
 
-        model.update(rewards, values, log_probs, mask, new_state)
+        model.update(rewards, values, log_probs, mask)
 
-        if episode % 50 == 0:
-            print("episode {} --> tot_reward = {}".format(episode, np.sum(rewards)))
+        rewards_history[episode] = np.sum(rewards)
+        if args.verbose >= 1:
+            if episode % 50 == 0:
+                print("episode {} --> tot_reward = {}".format(episode, np.sum(rewards)))
+    
+    model.close()
+
+    if args.verbose >= 2:
+        fig = plt.figure(figsize = (5,5))
+        plt.plot(range(episodes), rewards_history)
+        plt.xlabel("episode")
+        plt.ylabel("reward")
+        plt.show()
+            
+
+            
 
 
     
