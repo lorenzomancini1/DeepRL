@@ -145,7 +145,7 @@ if __name__ == "__main__":
     parser.add_argument("-s", "--steps", type=int, default=100, help="number of steps per episode")
     parser.add_argument("-g", "--gamma", type=float, default=0.99, help="set the discount factor")
     parser.add_argument("-l", "--lambda_", type=float, default=1, help="set the lambda value for the GAE")
-    parser.add_argument("-v", "--verbose", action="count", help="show log of rewards")
+    parser.add_argument("-v", "--verbose", action="count", help="show log of rewards", default=0)
 
     args = parser.parse_args()
 
