@@ -83,7 +83,7 @@ class A2C:
         rewards   = []
         mask      = []
 
-        state, _ = self.env.reset()
+        state = self.env.reset()
         #print(state)
 
         for step in range(1, max_steps + 1):
@@ -97,7 +97,7 @@ class A2C:
             log_prob = torch.log(policy.squeeze(0)[action])
 
             # do a step
-            new_state, reward, done, truncated, info = self.env.step(action)
+            new_state, reward, done, info = self.env.step(action)
 
             rewards.append(reward)
             values.append(value)
