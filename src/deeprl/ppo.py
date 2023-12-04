@@ -6,6 +6,18 @@ import torch.nn as nn
 import torch.optim as optim
 import gym
 import argparse
+from tabulate import tabulate
+
+# set device to cpu or cuda
+print("=========================================")
+device = torch.device('cpu')
+if(torch.cuda.is_available()): 
+    device = torch.device('cuda:0') 
+    torch.cuda.empty_cache()
+    print("Device set to : " + str(torch.cuda.get_device_name(device)))
+else:
+    print("Device set to : cpu")
+print("=========================================")
 
 class Actor(nn.Module):
     def __init__(self, obs_dim, act_dim, hidden_dim):
@@ -46,6 +58,9 @@ def get_env_shape(env):
     return obs_dim, act_dim
 
 def get_returns(rewards, values, mask, gamma, lambda_):
+    '''
+    Compute the returns using the GAE formula
+    '''
     returns = np.zeros_like(rewards)
     GAE = 0
     for t in reversed(range(len(rewards))):
@@ -55,17 +70,27 @@ def get_returns(rewards, values, mask, gamma, lambda_):
     return returns
 
 class PPO:
-    def __init__(self, env_name, hidden_dim = 256, lr_a = 3e-3, lr_c = 3e-3, gamma = 0.99, lambda_ = 0.95, mini_batch_size = 7, epsilon = 0.2, device = "cpu"):
+    def __init__(self, lr_a = 3e-3, lr_c = 3e-3, device = "cpu", **kwargs):
 
-        self.gamma = gamma
-        self.lambda_ = lambda_
-        self.epsilon = epsilon
-        self.mini_batch_size = mini_batch_size
+        # hyperparameters
+        self.gamma   = kwargs.get("gamma")
+        self.lambda_ = kwargs.get("lambda_")
+        self.epsilon = kwargs.get("epsilon")
+
+        self.max_steps = kwargs.get("max_steps")
+
+        self.mini_batch_size = kwargs.get("mini_batch_size", 6)
+        hidden_dim           = kwargs.get("hidden_dim", 256)
+        lr_a                 = kwargs.get("step_actor")
+        lr_c                 = kwargs.get("step_critic")
+
+        # set the proper device
         self.device = device
-        #self.max_steps = max_steps
-        self.env  = gym.make(env_name)
-        self.obs_dim , self.act_dim = get_env_shape(self.env)
 
+        # make the gym environment and get the observation and action dimensions
+        self.env    = gym.make(kwargs.get("env_name"))
+        self.obs_dim , self.act_dim = get_env_shape(self.env)
+        
         #initialize networks
         self.actor  = Actor(self.obs_dim, self.act_dim, hidden_dim)
         self.critic = Critic(self.obs_dim, hidden_dim)
@@ -80,9 +105,16 @@ class PPO:
     def close(self):
         self.env.close()
 
-    def rollout(self, max_steps = 100):
+    def get_shape(self):
+        return self.obs_dim, self.act_dim
+
+    def rollout(self):
+        '''
+        Collect data by performing a n-step trajectory
+        '''
 
         env = self.env
+        max_steps = self.max_steps
 
         states    = np.empty(max_steps, dtype = object)
         actions   = np.zeros(max_steps, dtype = int)
@@ -94,11 +126,14 @@ class PPO:
         state = env.reset()
 
         for step in range(max_steps):
+
+            # we don't need the gradients for the moment. We will compute them again in the epochs loop
             with torch.no_grad():
                 policy = self.actor(torch.tensor(state).unsqueeze(0))
                 value  = self.critic(torch.tensor(state).unsqueeze(0))
 
-            dist = policy.numpy()
+            dist = policy.numpy() # set the policy to numpy vector
+
             # select an action according to the policy
             action   = np.random.choice(self.act_dim, p = np.squeeze(dist))
             # compute the log_prob of that action
@@ -110,7 +145,7 @@ class PPO:
             states[step]    = state
             actions[step]   = action
             rewards[step]   = reward
-            values[step]    = value#.numpy()#[0, 0]
+            values[step]    = value
             log_probs[step] = log_prob
             mask[step]      = 1 - done
         
@@ -119,26 +154,28 @@ class PPO:
         
         stop = step + 1
         
+        # to compute the returns we need the value of the (n+1)-th state
         with torch.no_grad():
             values[stop] = self.critic(torch.tensor(new_state).unsqueeze(0))
             
-
         states    = states[:stop]
         actions   = actions[:stop]
         rewards   = rewards[:stop]
-        values    = values[:stop + 1]
-        #print(values[-1] != 0)
+        values    = values[:stop + 1] # we save the new state too for the computation of the returns
         log_probs = log_probs[:stop]
-        #print(log_probs)
         mask      = mask[:stop]
 
         returns = get_returns(rewards, values, mask, self.gamma, self.lambda_)
 
+        # computation of the advantages 
         advantages = returns - values[:-1]
 
         return states, actions, rewards, returns, advantages, log_probs
     
     def update(self, states, actions, log_probs, returns, advantages):
+        '''
+        Loop over the elements of a minibatch and update the Actor and the Critic for k-epochs
+        '''
 
         mini_batch_size = self.mini_batch_size
     
@@ -146,18 +183,23 @@ class PPO:
         critic_loss = torch.empty(mini_batch_size)
 
         for i in range(mini_batch_size):
+            # get the current state and action
             state  = states[i]
             action = actions[i]
 
+            # compute the policy and the value
             policy = self.actor(torch.tensor(state).unsqueeze(0).to(self.device))
             value  = self.critic(torch.tensor(state).unsqueeze(0).to(self.device))
 
+            # select the current advantage and return
             adv     = advantages[i]
             return_ = returns[i]
 
+            # compute the current log probability and the old one
             curr_log_prob = torch.log(policy.squeeze(0)[action])
             old_log_prob  = log_probs[i]
 
+            # compute the ratio beween new and old log prob
             ratio = (curr_log_prob - old_log_prob).exp()
             s1    = ratio * adv
             s2    = torch.clamp(ratio, 1.0 - self.epsilon, 1.0 + self.epsilon) * adv
@@ -165,9 +207,11 @@ class PPO:
             actor_loss[i]  = torch.min(s1, s2) 
             critic_loss[i] = return_ - value
 
+        # compute the losses
         epoch_actor_loss  = - actor_loss.mean()
         epoch_critic_loss = critic_loss.pow(2).mean()
 
+        # update the networks
         self.optimizer_a.zero_grad()
         self.optimizer_c.zero_grad()
 
@@ -187,11 +231,11 @@ class PPO:
         high = len(states)
         n = self.mini_batch_size
 
+        # get some random indexes for the trajectory
         random_idxs = np.random.randint(0, high, n)
 
         mb_states     = states[random_idxs]
         mb_actions    = actions[random_idxs]
-        #mb_values     = values[random_idxs]
         mb_log_probs  = log_probs[random_idxs]
         mb_returns    = returns[random_idxs]
         mb_advantages = advantages[random_idxs]
@@ -201,24 +245,47 @@ class PPO:
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--env", type=str, default="CartPole-v1", help="set the gym environment")
+
+    # environment
+    parser.add_argument("-e", "--env_name", type=str, default="CartPole-v1", help="set the gym environment")
+
+    # variables for the training loop
     parser.add_argument("--episodes", type=int, default=1000, help="number of episodes to run")
-    parser.add_argument("-s", "--steps", type=int, default=100, help="number of steps per episode")
-    parser.add_argument("-g", "--gamma", type=float, default=0.99, help="set the discount factor")
-    parser.add_argument("-l", "--lambda_", type=float, default=1, help="set the lambda value for the GAE")
+    parser.add_argument("-s", "--max_steps", type=int, default=100, help="number of steps per episode")
     parser.add_argument("--epochs", type=int, default=5, help="number of epochs per episode")
+    parser.add_argument("-mb", "--mini_batch_size", type=int, default=4, help="number of samples per mini batch")
+
+    # neural networks parameters
+    parser.add_argument("--hidden_dim", type=int, default=256, help="number of neurons in the hidden layer")
+    parser.add_argument("-sa", "--step_actor", type=float, default=3e-3, help="step size of the actor optimizer")
+    parser.add_argument("-sc", "--step_critic", type=float, default=3e-3, help="step size of the critic optimizer")
+
+    # policy gradient variables
+    parser.add_argument("-g", "--gamma", type=float, default=0.99, help="set the discount factor")
+    parser.add_argument("--epsilon", type=float, default=0.2, help="set the discount factor")
+    parser.add_argument("-l", "--lambda_", type=float, default=1, help="set the lambda value for the GAE")
+    
+    # log of rewards and plot 
     parser.add_argument("-v", "--verbose", action="count", help="show log of rewards", default=0)
 
     args = parser.parse_args()
 
-    env_name = args.env
-    print("#################################")
-    print("Running:", env_name)
-    print("#################################")
+    args_dict = vars(args)
 
-    model = PPO(env_name=env_name, gamma=args.gamma, lambda_ = args.lambda_)
+    env_name = args.env_name
+    
+    #print("#################################")
+    #print("Running:", env_name)
+    #print("#################################")
+
+    # Convert the dictionary directly to a list of tuples
+    table_data = list(args_dict.items())
+
+    # Print the table using tabulate
+    print(tabulate(table_data, headers=["Key", "Value"], tablefmt="fancy_grid"))
+
+    model = PPO(device = device, **args_dict)
     episodes = args.episodes
-    max_steps = args.steps
 
     ###########################
     ###### TRAINING LOOP ######
@@ -226,7 +293,7 @@ if __name__ == "__main__":
     rewards_history = np.zeros(episodes)
     for episode in range(episodes):
 
-        states, actions, rewards, returns, advantages, log_probs = model.rollout(max_steps = 150)
+        states, actions, rewards, returns, advantages, log_probs = model.rollout()
 
         rewards_history[episode] = np.sum(rewards)
         if args.verbose >= 1:
