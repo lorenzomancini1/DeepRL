@@ -1,23 +1,17 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
+import random
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
 import gym
+
 import argparse
 from tabulate import tabulate
-
-# set device to cpu or cuda
-print("=========================================")
-device = torch.device('cpu')
-if(torch.cuda.is_available()): 
-    device = torch.device('cuda:0') 
-    torch.cuda.empty_cache()
-    print("Device set to : " + str(torch.cuda.get_device_name(device)))
-else:
-    print("Device set to : cpu")
-print("=========================================")
+import os
 
 class Actor(nn.Module):
     def __init__(self, obs_dim, act_dim, hidden_dim):
@@ -48,29 +42,24 @@ class Critic(nn.Module):
         value = self.critic(state)
         return value
 
-def get_env_shape(env):
-    try:    act_dim = env.action_space.n
-    except: act_dim = env.action_space.shape[0]
+#class Buffer(object):
+#    def __init__(self, capacity):
+#        self.buffer = deque(maxlen=capacity)
+#
+#    def push(self, state, action, reward, new_state, done):
+#        self.buffer.append( (state, action, reward, new_state, done) )
+#    
+#    def sample(self, batch_size):
+#        batch_size = min(batch_size, len(self))
+#        return random.sample(self.buffer, batch_size)
+#    
+#    def __len__(self):
+#        return len(self.buffer)
 
-    try:    obs_dim = env.observation_space.n
-    except: obs_dim = env.observation_space.shape[0]
 
-    return obs_dim, act_dim
-
-def get_returns(rewards, values, mask, gamma, lambda_):
-    '''
-    Compute the returns using the GAE formula
-    '''
-    returns = np.zeros_like(rewards)
-    GAE = 0
-    for t in reversed(range(len(rewards))):
-        delta = rewards[t] + gamma * values[t + 1] * mask[t] - values[t]
-        GAE = delta + gamma * lambda_ * GAE * mask[t]
-        returns[t] = GAE + values[t]
-    return returns
 
 class PPO:
-    def __init__(self, lr_a = 3e-3, lr_c = 3e-3, device = "cpu", **kwargs):
+    def __init__(self, env, device = "cpu", **kwargs):
 
         # hyperparameters
         self.gamma   = kwargs.get("gamma")
@@ -88,8 +77,9 @@ class PPO:
         self.device = device
 
         # make the gym environment and get the observation and action dimensions
-        self.env    = gym.make(kwargs.get("env_name"))
-        self.obs_dim , self.act_dim = get_env_shape(self.env)
+        #self.env    = gym.make(kwargs.get("env_name"))
+        self.env = gym.make(env)
+        self.obs_dim , self.act_dim = self.get_env_shape()
         
         #initialize networks
         self.actor  = Actor(self.obs_dim, self.act_dim, hidden_dim)
@@ -99,14 +89,35 @@ class PPO:
         self.optimizer_a = optim.Adam(self.actor.parameters(),  lr = lr_a)
         self.optimizer_c = optim.Adam(self.critic.parameters(), lr = lr_c)
 
+    def get_env_shape(self):
+        try:    act_dim = self.env.action_space.n
+        except: act_dim = self.env.action_space.shape[0]
+
+        try:    obs_dim = self.env.observation_space.n
+        except: obs_dim = self.env.observation_space.shape[0]
+
+        return obs_dim, act_dim
+    
+    def get_returns(self, rewards, values, mask):
+        '''
+        Compute the returns using the GAE formula
+        '''
+        returns = np.zeros_like(rewards)
+        GAE = 0
+        for t in reversed(range(len(rewards))):
+            delta = rewards[t] + self.gamma * values[t + 1] * mask[t] - values[t]
+            GAE = delta + self.gamma * self.lambda_ * GAE * mask[t]
+            returns[t] = GAE + values[t]
+        return returns
+
     def get_actor(self):
         return self.actor
     
     def close(self):
         self.env.close()
 
-    def get_shape(self):
-        return self.obs_dim, self.act_dim
+    #def get_shape(self):
+    #    return self.obs_dim, self.act_dim
 
     def rollout(self):
         '''
@@ -165,7 +176,7 @@ class PPO:
         log_probs = log_probs[:stop]
         mask      = mask[:stop]
 
-        returns = get_returns(rewards, values, mask, self.gamma, self.lambda_)
+        returns = self.get_returns(rewards, values, mask)
 
         # computation of the advantages 
         advantages = returns - values[:-1]
@@ -244,16 +255,29 @@ class PPO:
     
 if __name__ == "__main__":
 
+    # set device to cpu or cuda
+    print("=========================================")
+    device = torch.device('cpu')
+    if(torch.cuda.is_available()): 
+        device = torch.device('cuda:0') 
+        torch.cuda.empty_cache()
+        print("Device set to : " + str(torch.cuda.get_device_name(device)))
+    else:
+        print("Device set to : cpu")
+    print("=========================================")
+
+
+
     parser = argparse.ArgumentParser()
 
     # environment
     parser.add_argument("-e", "--env_name", type=str, default="CartPole-v1", help="set the gym environment")
 
     # variables for the training loop
-    parser.add_argument("--episodes", type=int, default=1000, help="number of episodes to run")
-    parser.add_argument("-s", "--max_steps", type=int, default=100, help="number of steps per episode")
+    parser.add_argument("--episodes", type=int, default=500, help="number of episodes to run")
+    parser.add_argument("-s", "--max_steps", type=int, default=160, help="number of steps per episode")
     parser.add_argument("--epochs", type=int, default=5, help="number of epochs per episode")
-    parser.add_argument("-mb", "--mini_batch_size", type=int, default=4, help="number of samples per mini batch")
+    parser.add_argument("-mb", "--mini_batch_size", type=int, default=6, help="number of samples per mini batch")
 
     # neural networks parameters
     parser.add_argument("--hidden_dim", type=int, default=256, help="number of neurons in the hidden layer")
@@ -263,10 +287,12 @@ if __name__ == "__main__":
     # policy gradient variables
     parser.add_argument("-g", "--gamma", type=float, default=0.99, help="set the discount factor")
     parser.add_argument("--epsilon", type=float, default=0.2, help="set the discount factor")
-    parser.add_argument("-l", "--lambda_", type=float, default=1, help="set the lambda value for the GAE")
+    parser.add_argument("-l", "--lambda_", type=float, default=0.95, help="set the lambda value for the GAE")
     
     # log of rewards and plot 
     parser.add_argument("-v", "--verbose", action="count", help="show log of rewards", default=0)
+    parser.add_argument("--save", type=int, help="save the rewards history", default=0)
+    parser.add_argument("--name", type=str, help="name of the saved file", default=" ")
 
     args = parser.parse_args()
 
@@ -284,7 +310,7 @@ if __name__ == "__main__":
     # Print the table using tabulate
     print(tabulate(table_data, headers=["Key", "Value"], tablefmt="fancy_grid"))
 
-    model = PPO(device = device, **args_dict)
+    model = PPO(env = env_name, device = device, **args_dict)
     episodes = args.episodes
 
     ###########################
@@ -313,4 +339,10 @@ if __name__ == "__main__":
         plt.xlabel("episode")
         plt.ylabel("reward")
         plt.show()
+        
+    if args.save:
+        if not os.path.exists("./data_ppo"):
+    # Create the directory
+            os.makedirs("data_ppo")        
+        np.savetxt('./data_ppo/n'+args.name+'.txt', np.column_stack((range(args.episodes), rewards_history)), header='X-axis Y-axis', comments='')
 

@@ -26,4 +26,5 @@ wheels/
 .installed.cfg
 *.egg
 
-
+# IPython Notebook
+.ipynb_checkpoints
